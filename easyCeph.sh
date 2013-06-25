@@ -1,7 +1,7 @@
 #!/bin/sh 
 readonly DRIVER_LIST=`pwd`/driver.sn
 # A#B#C#D#E A=dc B=room C=rack D=row E=weight(0.000~100)
-OSD_POOLS="1|ceph1|192.168.0.20|1#1#1#1#20 2|ceph2|192.168.0.100|1#1#1#2#20 3|ceph3|192.168.0.99|1#1#1#3#20 #4|ceph4|192.168.0.91|1#1#1#4#0"
+OSD_POOLS="#1|ceph1|192.168.0.20|1#1#1#1#20 #2|ceph2|192.168.0.100|1#1#1#2#20 #3|ceph3|192.168.0.99|1#1#1#3#20 4|ceph4#|192.168.0.91|1#1#1#4#0.1"
 readonly DEV="eth0"
 readonly STEP="100"
 readonly PG_NUM="40000"
@@ -70,6 +70,7 @@ cat > /etc/ceph/ceph.conf <<EOF
         osd recovery threads = $NUM
 	osd recovery max active = $NUM
         keyring = /etc/ceph/keyring
+	journal aio = true
 [osd]
         osd data = /srv/ceph/osd\$id
         osd journal = /srv/ceph/ssd/journal.\$id
@@ -77,10 +78,9 @@ cat > /etc/ceph/ceph.conf <<EOF
         keyring = /etc/ceph/keyring.\$name
 	debug osd = 5
         osd mkfs type = $FS_TYPE
-        ; solve rbd data corruption (sileht: disable by default in 0.48)
-        filestore fiemap = false
         ; The following assumes ext4 filesystem.
         ;filestore xattr use omap = true
+        ;filestore fiemap = true
 EOF
 
 for node in $OSD_POOLS;do
