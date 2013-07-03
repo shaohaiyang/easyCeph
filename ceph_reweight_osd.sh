@@ -1,5 +1,5 @@
 #!/bin/sh
-OSDS="201@202@203@204@205@206@207@208@209@210@211@212#20#0.1"
+OSDS="301@302@303@304@305@306@307@308@309@310@311@312#20#0.01"
 
 FILE=/tmp/.osd_tree
 rm -rf $FILE
@@ -19,4 +19,5 @@ for osd in $OSDS;do
 			ceph osd crush reweight osd.$id $new_weight
 		fi
 	done
+	echo "reweight done."
 done

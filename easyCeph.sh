@@ -1,10 +1,10 @@
 #!/bin/sh 
 readonly DRIVER_LIST=`pwd`/driver.sn
 # A#B#C#D#E A=dc B=room C=rack D=row E=weight(0.000~100)
-OSD_POOLS="#1|ceph1|192.168.0.20|1#1#1#1#20 #2|ceph2|192.168.0.100|1#1#1#2#20 #3|ceph3|192.168.0.99|1#1#1#3#20 4|ceph4#|192.168.0.91|1#1#1#4#0.1"
+OSD_POOLS="1#12|ceph1|192.168.0.20|1#1#1#1#20 2#12|ceph2|192.168.0.100|1#1#1#2#20 3#12|ceph3|192.168.0.99|1#1#1#3#20 #4#12|ceph4|192.168.0.91|1#1#1#4#20 #5#3|ceph5|192.168.0.92|1#1#1#5#5"
 readonly DEV="eth0"
-readonly STEP="100"
-readonly PG_NUM="40000"
+readonly STEP="12"
+readonly PG_NUM="48000"
 readonly REP_NUM="3"
 readonly AUTH="none" # none or cephx
 readonly CRUSH_MAP=/etc/ceph/crush
@@ -19,6 +19,9 @@ FS_TYPE="xfs"
 if [ $FS_TYPE == "xfs" ];then
 	FS_OPT="-l internal,lazy-count=1,size=128m -i attr=2 -d agcount=8 -i size=512"
 	FS_MOUNT="rw,noexec,nodev,noatime,nodiratime,nobarrier,logbsize=256k,logbufs=8,inode64"
+elif [ $FS_TYPE == "ext4" ];then
+	FS_OPT="-b 4096 -E stride=16,stripe-width=128 -T largefile"
+	FS_MOUNT="rw,sync,noatime,nodiratime,user_xattr,nobarrier,data=writeback"
 fi
 
 ### Time Zone 
@@ -54,15 +57,14 @@ cat > /etc/ceph/ceph.conf <<EOF
         auth cluster required = $AUTH
         auth service required = $AUTH
         auth client required = $AUTH
-	max open files = 65500
+	max open files = 60000
 	mon osd full ratio = .95
-	mon osd nearfull ratio = .60
+	mon osd nearfull ratio = .55
 	mon debug dump transactions = false
-	osd pool default size = $REP_NUM
 	osd pool default min_size = 1
+	osd pool default size = $REP_NUM
 	osd pool default pg num = $PG_NUM
 	osd pool default pgp num = $PG_NUM
-	osd target transaction size = 50
 	osd op thread timeout = 60
         osd op threads = $NUM
 	osd max backfills = $NUM
@@ -70,37 +72,43 @@ cat > /etc/ceph/ceph.conf <<EOF
         osd recovery threads = $NUM
 	osd recovery max active = $NUM
         keyring = /etc/ceph/keyring
-	journal aio = true
+	journal aio = false
+	journal dio = false
 [osd]
         osd data = /srv/ceph/osd\$id
         osd journal = /srv/ceph/ssd/journal.\$id
         osd journal size = 1024
-        keyring = /etc/ceph/keyring.\$name
-	debug osd = 5
         osd mkfs type = $FS_TYPE
+	debug osd = 5
+        keyring = /etc/ceph/keyring.\$name
+	filestore fiemap = false
         ; The following assumes ext4 filesystem.
-        ;filestore xattr use omap = true
-        ;filestore fiemap = true
+        filestore xattr use omap = true
 EOF
 
 for node in $OSD_POOLS;do
         echo "$node"|grep -q "^#"
         [ $? = 0 ] && continue
 
-        xx=$IFS;IFS="|";read -r id Host ip osds <<<"$node";IFS=$xx
+        xx=$IFS;IFS="|";read -r ids Host ip osds <<<"$node";IFS=$xx
 	host=${Host%#}
+	id=`echo $ids|cut -d# -f1`
+	osd_num=`echo $ids|cut -d# -f2`
+
         sed -r -i "/$host/d" /etc/hosts
         echo "$ip       $host" >> /etc/hosts
         xx=$IFS;IFS="#";read -r dc room rack row weight<<<"$osds";IFS=$xx
 
-        NODE_ID=$((id*$STEP))
+        NODE_ID=$(((id-1)*$STEP))
 
         j=1
         grep sata $DRIVER_LIST > $DRIVER_LIST.tmp
         while read LINE;do
+		[ $j -gt $osd_num ] && break
                 dev=`echo $LINE|awk '{print $NF}'`
                 label=`echo $LINE|awk '{print $1}'`
                 NICK=$((NODE_ID+$j))
+
                 vip=$(echo $ip|awk -F. '{print $1"."$2"."100"."$4}')
 
                 if [ $ADDR = $ip ] ;then
@@ -109,8 +117,12 @@ for node in $OSD_POOLS;do
                         echo "HOSTNAME=$host" >> /etc/sysconfig/network
 
                         # format them and wait to finished.
-                        mkfs.$FS_TYPE -f $FS_OPT $dev
-                        xfs_admin -L $label $dev
+			if [ $FS_TYPE == "xfs" ] ;then
+                        	mkfs.$FS_TYPE -f $FS_OPT $dev
+				xfs_admin -L $label $dev
+			elif [ $FS_TYPE == "ext4" ];then
+				mkfs.ext4 -L $label $dev
+			fi
                         mkdir -p /srv/ceph/osd$NICK
                         sed -r -i "/osd$NICK/d" /etc/rc.d/rc.local
 			STRING0=$STRING0"\necho 1024 > /sys/block/${dev#/dev/}/queue/nr_requests;echo 512 > /sys/block/${dev#/dev/}/queue/read_ahead_kb"
@@ -129,9 +141,14 @@ for node in $OSD_POOLS;do
 	if [ $ADDR = $ip ] ;then
        		dev=$(awk '/ssd/{print $NF}' $DRIVER_LIST|head -1)
 	        label=$(awk '/ssd/{print $1}' $DRIVER_LIST|head -1)
-		mkfs.$FS_TYPE -f $FS_OPT $dev
+		# format them and wait to finished.
+		if [ $FS_TYPE == "xfs" ] ;then
+			mkfs.$FS_TYPE -f $FS_OPT $dev
+			xfs_admin -L $label $dev
+		elif [ $FS_TYPE == "ext4" ];then
+			mkfs.ext4 -L $label $dev
+		fi
 		mkdir -p /srv/ceph/ssd/mon$id
-		xfs_admin -L $label $dev
 		sed -r -i "/mon$id/d" /etc/rc.d/rc.local
 		STRING1=$STRING1"\nmount -t $FS_TYPE -o $FS_MOUNT -L $label /srv/ceph/ssd/;mkdir -p /srv/ceph/ssd/mon$id"
 		STRING0=$STRING0"\necho 1024 > /sys/block/${dev#/dev/}/queue/nr_requests;echo 512 > /sys/block/${dev#/dev/}/queue/read_ahead_kb"
@@ -154,15 +171,17 @@ for node in $OSD_POOLS;do
 
 	j=0
 	jj=0
-	xx=$IFS;IFS="|";read -r id Host ip osds <<<"$node";IFS=$xx
+	xx=$IFS;IFS="|";read -r ids Host ip osds <<<"$node";IFS=$xx
 	host=${Host%#}
+	id=`echo $ids|cut -d# -f1`
+	osd_num=`echo $ids|cut -d# -f2`
 	sed -r -i "/$host/d" /etc/hosts
 	echo "$ip	$host" >> /etc/hosts
 	xx=$IFS;IFS="#";read -r dc room rack row weight<<<"$osds";IFS=$xx
 
-        NODE_ID=$((id*$STEP))
-        STRING4=$STRING4"host $host {\n\tid -$NODE_ID\n\talg straw\n\thash 0\n"
-	STRING5="rack rack-$rack {\n\tid -$((rack*$STEP-40))\n\talg straw\n\thash 0"
+        NODE_ID=$(((id-1)*$STEP))
+        STRING4=$STRING4"host $host {\n\tid -$((id*$STEP))\n\talg straw\n\thash 0\n"
+	STRING5="rack rack-$rack {\n\tid -$((rack*$STEP-$rack))\n\talg straw\n\thash 0"
 	echo -e $STRING5 > /tmp/.rack$rack.id
 
 	grep sata $DRIVER_LIST > $DRIVER_LIST.tmp
@@ -170,6 +189,7 @@ for node in $OSD_POOLS;do
 		dev=`echo $LINE|awk '{print $NF}'`
 		label=`echo $LINE|awk '{print $1}'`
 		((j++))
+		[ $j -gt $osd_num ] && break
 		NICK=$((NODE_ID+$j))
         	STRING3=$STRING3"device $NICK osd.$NICK\n"
         	STRING4=$STRING4"\titem osd.$NICK weight $weight\n"
@@ -242,8 +262,10 @@ for node in $OSD_POOLS;do
         echo "$node"|grep -q "^#"
         [ $? = 0 ] && continue
 
-        xx=$IFS;IFS="|";read -r id Host ip osds <<<"$node";IFS=$xx
+        xx=$IFS;IFS="|";read -r ids Host ip osds <<<"$node";IFS=$xx
 	host=${Host%#}
+	id=`echo $ids|cut -d# -f1`
+	osd_num=`echo $ids|cut -d# -f2`
 	if [ $ADDR != $ip ] ;then
 		echo "==== Copy file -> ( $host ) $ip "
         	$SSHDO $ip "sed -r -i \"/$host/d\" /etc/hosts;echo -e \"$ip\t$host\" >> /etc/hosts"
